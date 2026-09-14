@@ -599,6 +599,74 @@ func TestClientClosed(t *testing.T) {
 	require.True(t, cl.Closed())
 }
 
+// newQueuedTestClient returns a client without a write loop and with a packet waiting
+// in its outbound queue, so WritePacket buffers what it is given.
+func newQueuedTestClient() (cl *Client, r net.Conn) {
+	r, w := net.Pipe()
+	cl = newClient(w, &ops{
+		info:  new(system.Info),
+		hooks: new(Hooks),
+		log:   logger,
+		options: &Options{
+			Capabilities: &Capabilities{
+				ReceiveMaximum:             10,
+				TopicAliasMaximum:          10000,
+				MaximumClientWritesPending: 3,
+				maximumPacketID:            10,
+			},
+			ClientNetWriteBufferSize: 1024,
+		},
+	})
+	cl.ID = "mochi"
+	cl.State.outbound <- packets.TPacketData[packets.Publish].Get(packets.TPublishNoPayload).Packet
+	return cl, r
+}
+
+func TestClientStopFlushesBufferedWrites(t *testing.T) {
+	cl, r := newQueuedTestClient()
+	puback := packets.TPacketData[packets.Puback].Get(packets.TPuback)
+	cl.Properties.ProtocolVersion = puback.Packet.ProtocolVersion
+	require.NoError(t, cl.WritePacket(*puback.Packet))
+	require.NotNil(t, cl.Net.outbuf, "the PUBACK was written instead of buffered")
+
+	got := make(chan []byte)
+	go func() {
+		b, _ := io.ReadAll(r)
+		got <- b
+	}()
+	cl.Stop(errClientStop)
+	require.Equal(t, puback.RawBytes, <-got)
+}
+
+func TestClientStopDoesNotWaitLongForAPeerThatStoppedReading(t *testing.T) {
+	cl, _ := newQueuedTestClient()
+	puback := packets.TPacketData[packets.Puback].Get(packets.TPuback)
+	cl.Properties.ProtocolVersion = puback.Packet.ProtocolVersion
+	require.NoError(t, cl.WritePacket(*puback.Packet))
+
+	// Nothing reads the pipe, so the flush blocks as it would on a stalled peer.
+	start := time.Now()
+	cl.Stop(errClientStop)
+	require.Less(t, time.Since(start), stopFlushTimeout+time.Second)
+	require.True(t, cl.Closed())
+}
+
+func TestClientStopDoesNotWaitLongBehindABlockedWrite(t *testing.T) {
+	cl, _, _ := newTestClient()
+	pk := packets.TPacketData[packets.Publish].Get(packets.TPublishBasic).Packet
+	cl.Properties.ProtocolVersion = pk.ProtocolVersion
+
+	// Nothing reads the pipe, so this write blocks while it holds the client lock.
+	written := make(chan error)
+	go func() { written <- cl.WritePacket(*pk) }()
+	time.Sleep(50 * time.Millisecond)
+
+	start := time.Now()
+	cl.Stop(errClientStop)
+	require.Less(t, time.Since(start), stopFlushTimeout+time.Second)
+	require.Error(t, <-written)
+}
+
 func TestClientIsTakenOver(t *testing.T) {
 	cl, _, _ := newTestClient()
 	require.False(t, cl.IsTakenOver())

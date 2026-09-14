@@ -389,11 +389,16 @@ func (cl *Client) Read(packetHandler ReadFn) error {
 	}
 }
 
+// stopFlushTimeout bounds how long Stop spends writing out packets that WritePacket
+// buffered, before it closes the connection anyway.
+const stopFlushTimeout = time.Second
+
 // Stop instructs the client to shut down all processing goroutines and disconnect.
 func (cl *Client) Stop(err error) {
 	cl.State.endOnce.Do(func() {
 
 		if cl.Net.Conn != nil {
+			cl.flushBeforeClose()
 			_ = cl.Net.Conn.Close() // omit close error
 		}
 
@@ -407,6 +412,20 @@ func (cl *Client) Stop(err error) {
 
 		atomic.StoreInt64(&cl.State.disconnected, time.Now().Unix())
 	})
+}
+
+// flushBeforeClose writes out what WritePacket buffered while other packets were
+// queued, such as a PUBACK, which closing the connection would otherwise drop. If the
+// peer has stopped reading, the connection is closed under the write after
+// stopFlushTimeout; a write deadline would not reach a websocket write.
+func (cl *Client) flushBeforeClose() {
+	conn := cl.Net.Conn
+	timer := time.AfterFunc(stopFlushTimeout, func() { _ = conn.Close() })
+	defer timer.Stop()
+
+	cl.Lock()
+	defer cl.Unlock()
+	_ = cl.flushOutbuf()
 }
 
 // StopCause returns the reason the client connection was stopped, if any.
