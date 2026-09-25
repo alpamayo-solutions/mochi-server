@@ -1245,6 +1245,38 @@ func TestInheritClientSession(t *testing.T) {
 	require.Equal(t, 0, cl.State.Subscriptions.Len())
 }
 
+func TestInheritClientSessionPublishesTheTakenOverWillOnce(t *testing.T) {
+	s := newServer()
+
+	existing, _, _ := newTestClient()
+	existing.Net.Conn = nil
+	existing.ID = "mochi"
+	existing.Properties.Will = Will{
+		Flag:      1,
+		TopicName: "a/b/c",
+		Payload:   []byte("gone"),
+		Retain:    true,
+	}
+	s.Clients.Add(existing)
+
+	cl, _, _ := newTestClient()
+	cl.Properties.ProtocolVersion = 5
+	s.inheritClientSession(packets.Packet{Connect: packets.ConnectParams{ClientIdentifier: "mochi", Clean: true}}, cl)
+
+	// The will is retained before the new connection is acknowledged.
+	retained := s.Topics.Messages("a/b/c")
+	require.Equal(t, 1, len(retained))
+	require.Equal(t, []byte("gone"), retained[0].Payload)
+
+	// The replaced connection unwinding later does not publish it again, so it
+	// cannot overwrite what the new connection retained in between.
+	s.retainMessage(cl, packets.Packet{FixedHeader: packets.FixedHeader{Type: packets.Publish, Retain: true}, TopicName: "a/b/c", Payload: []byte("back")})
+	s.sendLWT(existing)
+	retained = s.Topics.Messages("a/b/c")
+	require.Equal(t, 1, len(retained))
+	require.Equal(t, []byte("back"), retained[0].Payload)
+}
+
 func TestServerUnsubscribeClient(t *testing.T) {
 	s := newServer()
 	cl, _, _ := newTestClient()

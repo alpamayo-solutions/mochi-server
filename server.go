@@ -478,7 +478,7 @@ func (s *Server) attachClient(cl *Client, listener string) error {
 		s.sendLWT(cl)
 		cl.Stop(err)
 	} else {
-		cl.Properties.Will = Will{} // [MQTT-3.14.4-3] [MQTT-3.1.2-10]
+		atomic.StoreUint32(&cl.Properties.Will.Flag, 0) // [MQTT-3.14.4-3] [MQTT-3.1.2-10]
 	}
 	s.Log.Debug("client disconnected", "error", err, "client", cl.ID, "remote", cl.Net.Remote, "listener", listener)
 
@@ -561,7 +561,13 @@ func (s *Server) validateConnect(cl *Client, pk packets.Packet) packets.Code {
 // session is abandoned.
 func (s *Server) inheritClientSession(pk packets.Packet, cl *Client) bool {
 	if existing, ok := s.Clients.Get(cl.ID); ok {
-		_ = s.DisconnectClient(existing, packets.ErrSessionTakenOver)                                   // [MQTT-3.1.4-3]
+		// The existing client's will is published here, before the new connection is
+		// acknowledged, so it cannot land after anything the new connection publishes.
+		willClaimed := claimLWT(existing)
+		_ = s.DisconnectClient(existing, packets.ErrSessionTakenOver) // [MQTT-3.1.4-3]
+		if willClaimed {
+			s.publishLWT(existing)
+		}
 		if pk.Connect.Clean || (existing.Properties.Clean && existing.Properties.ProtocolVersion < 5) { // [MQTT-3.1.2-4] [MQTT-3.1.4-4]
 			s.UnsubscribeClient(existing)
 			existing.ClearInflights()
@@ -1385,8 +1391,9 @@ func (s *Server) processDisconnect(cl *Client, pk packets.Packet) error {
 		return packets.CodeDisconnectWillMessage
 	}
 
-	s.loop.willDelayed.Delete(cl.ID) // [MQTT-3.1.3-9] [MQTT-3.1.2-8]
-	cl.Stop(packets.CodeDisconnect)  // [MQTT-3.14.4-2]
+	atomic.StoreUint32(&cl.Properties.Will.Flag, 0) // [MQTT-3.14.4-3] [MQTT-3.1.2-10]
+	s.loop.willDelayed.Delete(cl.ID)                // [MQTT-3.1.3-9] [MQTT-3.1.2-8]
+	cl.Stop(packets.CodeDisconnect)                 // [MQTT-3.14.4-2]
 
 	return nil
 }
@@ -1495,10 +1502,20 @@ func (s *Server) closeListenerClients(listener string) {
 
 // sendLWT issues an LWT message to a topic when a client disconnects.
 func (s *Server) sendLWT(cl *Client) {
-	if atomic.LoadUint32(&cl.Properties.Will.Flag) == 0 {
-		return
+	if claimLWT(cl) {
+		s.publishLWT(cl)
 	}
+}
 
+// claimLWT clears the client's will flag and reports whether this call cleared it,
+// so a will is published at most once when a session takeover and the client's own
+// disconnect race for it.
+func claimLWT(cl *Client) bool {
+	return atomic.CompareAndSwapUint32(&cl.Properties.Will.Flag, 1, 0) // [MQTT-3.1.2-10]
+}
+
+// publishLWT publishes a will claimed by claimLWT.
+func (s *Server) publishLWT(cl *Client) {
 	modifiedLWT := s.hooks.OnWill(cl, cl.Properties.Will)
 
 	pk := packets.Packet{
@@ -1527,8 +1544,7 @@ func (s *Server) sendLWT(cl *Client) {
 		s.retainMessage(cl, pk)
 	}
 
-	s.publishToSubscribers(pk)                      // [MQTT-3.1.2-8]
-	atomic.StoreUint32(&cl.Properties.Will.Flag, 0) // [MQTT-3.1.2-10]
+	s.publishToSubscribers(pk) // [MQTT-3.1.2-8]
 	s.hooks.OnWillSent(cl, pk)
 }
 
