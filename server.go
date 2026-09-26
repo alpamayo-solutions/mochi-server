@@ -1005,8 +1005,8 @@ func (s *Server) publishToSubscribers(pk packets.Packet) {
 	}
 
 	subscribers := s.Topics.Subscribers(pk.TopicName)
+	subscribers = s.hooks.OnSelectSubscribers(subscribers, pk)
 	if len(subscribers.Shared) > 0 {
-		subscribers = s.hooks.OnSelectSubscribers(subscribers, pk)
 		if len(subscribers.SharedSelected) == 0 {
 			subscribers.SelectShared()
 		}

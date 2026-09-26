@@ -1972,6 +1972,57 @@ func TestPublishToSubscribers(t *testing.T) {
 	require.True(t, ok)
 }
 
+type dropSubscriberHook struct {
+	HookBase
+	drop string
+}
+
+func (h *dropSubscriberHook) ID() string { return "drop-subscriber" }
+
+func (h *dropSubscriberHook) Provides(b byte) bool { return b == OnSelectSubscribers }
+
+func (h *dropSubscriberHook) OnSelectSubscribers(subs *Subscribers, _ packets.Packet) *Subscribers {
+	delete(subs.Subscriptions, h.drop)
+	return subs
+}
+
+// A hook removes a subscriber from a publish without any shared subscription.
+func TestPublishToSubscribersSelectHookWithoutSharedSubscriptions(t *testing.T) {
+	s := newServer()
+	require.NoError(t, s.AddHook(&dropSubscriberHook{drop: "cl2"}, nil))
+	cl, r1, w1 := newTestClient()
+	cl.ID = "cl1"
+	cl2, r2, w2 := newTestClient()
+	cl2.ID = "cl2"
+	s.Clients.Add(cl)
+	s.Clients.Add(cl2)
+	require.True(t, s.Topics.Subscribe(cl.ID, packets.Subscription{Filter: "a/b/c"}))
+	require.True(t, s.Topics.Subscribe(cl2.ID, packets.Subscription{Filter: "a/b/c"}))
+
+	cl1Recv := make(chan []byte)
+	go func() {
+		buf, err := io.ReadAll(r1)
+		require.NoError(t, err)
+		cl1Recv <- buf
+	}()
+	cl2Recv := make(chan []byte)
+	go func() {
+		buf, err := io.ReadAll(r2)
+		require.NoError(t, err)
+		cl2Recv <- buf
+	}()
+
+	go func() {
+		s.publishToSubscribers(*packets.TPacketData[packets.Publish].Get(packets.TPublishBasic).Packet)
+		time.Sleep(time.Millisecond)
+		_ = w1.Close()
+		_ = w2.Close()
+	}()
+
+	require.Equal(t, packets.TPacketData[packets.Publish].Get(packets.TPublishBasic).RawBytes, <-cl1Recv)
+	require.Equal(t, []byte{}, <-cl2Recv)
+}
+
 func TestPublishToSubscribersMessageExpiryDelta(t *testing.T) {
 	s := newServer()
 	s.Options.Capabilities.MaximumMessageExpiryInterval = 86400
