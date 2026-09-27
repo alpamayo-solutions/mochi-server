@@ -180,3 +180,44 @@ func TestCloseAllListeners(t *testing.T) {
 	require.True(t, closed["t2"])
 	require.True(t, closed["t3"])
 }
+
+func TestCloseAllRefusesLateClientsAndWaitsForAdmittedClients(t *testing.T) {
+	l := New()
+	l.Add(NewMockListener("t1", testAddr))
+	require.True(t, l.BeginClient())
+	closing := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		l.CloseAll(func(string) { close(closing) })
+		close(done)
+	}()
+	<-closing
+	require.False(t, l.BeginClient())
+	select {
+	case <-done:
+		t.Fatal("shutdown returned before the admitted client finished")
+	default:
+	}
+	l.ClientsWg.Done()
+	<-done
+	require.False(t, l.BeginClient())
+}
+
+func TestCloseAllRacingConnectionAdmission(t *testing.T) {
+	for i := 0; i < 1000; i++ {
+		l := New()
+		start := make(chan struct{})
+		done := make(chan struct{})
+		go func() {
+			<-start
+			if l.BeginClient() {
+				l.ClientsWg.Done()
+			}
+			close(done)
+		}()
+		close(start)
+		l.CloseAll(func(string) {})
+		<-done
+		require.False(t, l.BeginClient())
+	}
+}

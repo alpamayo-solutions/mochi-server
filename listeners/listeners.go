@@ -42,6 +42,8 @@ type Listener interface {
 type Listeners struct {
 	ClientsWg sync.WaitGroup      // a waitgroup that waits for all clients in all listeners to finish.
 	internal  map[string]Listener // a map of active listeners.
+	clientMu  sync.Mutex          // serializes connection admission with shutdown
+	closing   bool
 	sync.RWMutex
 }
 
@@ -117,8 +119,23 @@ func (l *Listeners) Close(id string, closer CloseFn) {
 	}
 }
 
+// BeginClient registers a connection before shutdown starts. A false result means
+// the caller must close the connection without attaching it to the server.
+func (l *Listeners) BeginClient() bool {
+	l.clientMu.Lock()
+	defer l.clientMu.Unlock()
+	if l.closing {
+		return false
+	}
+	l.ClientsWg.Add(1)
+	return true
+}
+
 // CloseAll iterates and closes all registered listeners.
 func (l *Listeners) CloseAll(closer CloseFn) {
+	l.clientMu.Lock()
+	l.closing = true
+	l.clientMu.Unlock()
 	l.RLock()
 	i := 0
 	ids := make([]string, len(l.internal))

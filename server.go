@@ -404,8 +404,11 @@ func (s *Server) EstablishConnection(listener string, c net.Conn) error {
 // attachClient validates an incoming client connection and if viable, attaches the client
 // to the server, performs session housekeeping, and reads incoming packets.
 func (s *Server) attachClient(cl *Client, listener string) error {
+	if !s.Listeners.BeginClient() {
+		cl.Stop(packets.ErrServerShuttingDown)
+		return packets.ErrServerShuttingDown
+	}
 	defer s.Listeners.ClientsWg.Done()
-	s.Listeners.ClientsWg.Add(1)
 
 	go cl.WriteLoop()
 	defer cl.Stop(nil)
