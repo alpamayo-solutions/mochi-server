@@ -1714,8 +1714,16 @@ func (s *Server) clearExpiredClients(dt int64) {
 }
 
 // clearExpiredRetainedMessage deletes retained messages from topics if they have expired.
+//
+// Without a maximum expiry interval only a message that carries its own expiry
+// can expire, so only those are visited: a broker retaining hundreds of
+// thousands of messages otherwise copied all of them every second.
 func (s *Server) clearExpiredRetainedMessages(now int64) {
-	for filter, pk := range s.Topics.Retained.GetAll() {
+	candidates := s.Topics.RetainedExpiring
+	if s.Options.Capabilities.MaximumMessageExpiryInterval > 0 {
+		candidates = s.Topics.Retained
+	}
+	for filter, pk := range candidates.GetAll() {
 		expired := pk.ProtocolVersion == 5 && pk.Expiry > 0 && pk.Expiry < now // [MQTT-3.3.2-5]
 
 		// If the maximum message expiry interval is set (greater than 0), and the message
@@ -1725,6 +1733,7 @@ func (s *Server) clearExpiredRetainedMessages(now int64) {
 
 		if expired || enforced {
 			s.Topics.Retained.Delete(filter)
+			s.Topics.RetainedExpiring.Delete(filter)
 			s.hooks.OnRetainedExpired(filter)
 		}
 	}

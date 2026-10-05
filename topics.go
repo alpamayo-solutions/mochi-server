@@ -349,13 +349,17 @@ func (s *Subscribers) MergeSharedSelected() {
 // TopicsIndex is a prefix/trie tree containing topic subscribers and retained messages.
 type TopicsIndex struct {
 	Retained *packets.Packets
-	root     *particle // a leaf containing a message and more leaves.
+	// RetainedExpiring holds the retained messages that carry a message
+	// expiry, so the expiry sweep need not visit every retained message.
+	RetainedExpiring *packets.Packets
+	root             *particle // a leaf containing a message and more leaves.
 }
 
 // NewTopicsIndex returns a pointer to a new instance of Index.
 func NewTopicsIndex() *TopicsIndex {
 	return &TopicsIndex{
-		Retained: packets.NewPackets(),
+		Retained:         packets.NewPackets(),
+		RetainedExpiring: packets.NewPackets(),
 		root: &particle{
 			particles:     newParticles(),
 			subscriptions: NewSubscriptions(),
@@ -460,6 +464,11 @@ func (x *TopicsIndex) RetainMessage(pk packets.Packet) int64 {
 	if len(pk.Payload) > 0 {
 		n.retainPath = pk.TopicName
 		x.Retained.Add(pk.TopicName, pk)
+		if pk.Expiry > 0 {
+			x.RetainedExpiring.Add(pk.TopicName, pk)
+		} else {
+			x.RetainedExpiring.Delete(pk.TopicName)
+		}
 		return 1
 	}
 
@@ -470,6 +479,7 @@ func (x *TopicsIndex) RetainMessage(pk packets.Packet) int64 {
 
 	n.retainPath = ""
 	x.Retained.Delete(pk.TopicName) // [MQTT-3.3.1-6] [MQTT-3.3.1-7]
+	x.RetainedExpiring.Delete(pk.TopicName)
 	x.trim(n)
 
 	return out
