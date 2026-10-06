@@ -7,6 +7,7 @@ package mqtt
 import (
 	"bytes"
 	"encoding/binary"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -4030,4 +4031,62 @@ func TestMinimum(t *testing.T) {
 	require.EqualValues(t, -1, minimum(-1, 0)) // negative values are not used, but included here for completeness
 	require.EqualValues(t, -1, minimum(-1, 20))
 	require.EqualValues(t, -2, minimum(-1, -2))
+}
+
+// Without a maximum expiry interval the sweep visits only retained messages
+// that carry an expiry: they still expire, and the rest are left alone.
+func TestServerClearExpiredRetainedVisitsOnlyExpiringMessages(t *testing.T) {
+	s := New(nil)
+	require.NotNil(t, s)
+	s.Options.Capabilities.MaximumMessageExpiryInterval = 0
+
+	n := time.Now().Unix()
+	retain := func(topic string, expiry int64) {
+		s.Topics.RetainMessage(packets.Packet{TopicName: topic, Payload: []byte("v"), ProtocolVersion: 5, Created: n - 100, Expiry: expiry})
+	}
+	for i := 0; i < 1000; i++ {
+		retain(fmt.Sprintf("plain/%d", i), 0)
+	}
+	retain("expires/soon", n-1)
+	retain("expires/later", n+60)
+	retain("was/expiring", n-1)
+	retain("was/expiring", 0) // retained again without an expiry
+	require.Len(t, s.Topics.RetainedExpiring.GetAll(), 2)
+
+	s.clearExpiredRetainedMessages(n)
+	require.Len(t, s.Topics.Retained.GetAll(), 1002)
+	_, ok := s.Topics.Retained.Get("expires/soon")
+	require.False(t, ok)
+	_, ok = s.Topics.Retained.Get("was/expiring")
+	require.True(t, ok)
+	require.Len(t, s.Topics.RetainedExpiring.GetAll(), 1)
+
+	// Clearing a retained message forgets its expiry too.
+	s.Topics.RetainMessage(packets.Packet{TopicName: "expires/later"})
+	require.Len(t, s.Topics.RetainedExpiring.GetAll(), 0)
+}
+
+// A message retained again at a topic after the sweep took its snapshot is not
+// removed by that sweep: only the message it judged expired is.
+func TestServerExpireRetainedKeepsAMessageRetainedAfterTheSnapshot(t *testing.T) {
+	s := New(nil)
+	require.NotNil(t, s)
+	n := time.Now().Unix()
+	old := packets.Packet{TopicName: "a/b", Payload: []byte("old"), ProtocolVersion: 5, Created: n - 100, Expiry: n - 1}
+	s.Topics.RetainMessage(old)
+	judged, ok := s.Topics.RetainedExpiring.Get("a/b")
+	require.True(t, ok)
+
+	fresh := packets.Packet{TopicName: "a/b", Payload: []byte("new"), ProtocolVersion: 5, Created: n, Expiry: n + 60}
+	s.Topics.RetainMessage(fresh)
+
+	require.False(t, s.Topics.ExpireRetained("a/b", judged))
+	got, ok := s.Topics.Retained.Get("a/b")
+	require.True(t, ok)
+	require.Equal(t, []byte("new"), got.Payload)
+
+	require.True(t, s.Topics.ExpireRetained("a/b", got))
+	_, ok = s.Topics.Retained.Get("a/b")
+	require.False(t, ok)
+	require.Len(t, s.Topics.RetainedExpiring.GetAll(), 0)
 }
