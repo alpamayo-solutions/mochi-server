@@ -1731,9 +1731,7 @@ func (s *Server) clearExpiredRetainedMessages(now int64) {
 		enforced := s.Options.Capabilities.MaximumMessageExpiryInterval > 0 &&
 			now-pk.Created > s.Options.Capabilities.MaximumMessageExpiryInterval
 
-		if expired || enforced {
-			s.Topics.Retained.Delete(filter)
-			s.Topics.RetainedExpiring.Delete(filter)
+		if (expired || enforced) && s.Topics.ExpireRetained(filter, pk) {
 			s.hooks.OnRetainedExpired(filter)
 		}
 	}

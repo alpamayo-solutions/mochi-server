@@ -4065,3 +4065,28 @@ func TestServerClearExpiredRetainedVisitsOnlyExpiringMessages(t *testing.T) {
 	s.Topics.RetainMessage(packets.Packet{TopicName: "expires/later"})
 	require.Len(t, s.Topics.RetainedExpiring.GetAll(), 0)
 }
+
+// A message retained again at a topic after the sweep took its snapshot is not
+// removed by that sweep: only the message it judged expired is.
+func TestServerExpireRetainedKeepsAMessageRetainedAfterTheSnapshot(t *testing.T) {
+	s := New(nil)
+	require.NotNil(t, s)
+	n := time.Now().Unix()
+	old := packets.Packet{TopicName: "a/b", Payload: []byte("old"), ProtocolVersion: 5, Created: n - 100, Expiry: n - 1}
+	s.Topics.RetainMessage(old)
+	judged, ok := s.Topics.RetainedExpiring.Get("a/b")
+	require.True(t, ok)
+
+	fresh := packets.Packet{TopicName: "a/b", Payload: []byte("new"), ProtocolVersion: 5, Created: n, Expiry: n + 60}
+	s.Topics.RetainMessage(fresh)
+
+	require.False(t, s.Topics.ExpireRetained("a/b", judged))
+	got, ok := s.Topics.Retained.Get("a/b")
+	require.True(t, ok)
+	require.Equal(t, []byte("new"), got.Payload)
+
+	require.True(t, s.Topics.ExpireRetained("a/b", got))
+	_, ok = s.Topics.Retained.Get("a/b")
+	require.False(t, ok)
+	require.Len(t, s.Topics.RetainedExpiring.GetAll(), 0)
+}

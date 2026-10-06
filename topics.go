@@ -485,6 +485,23 @@ func (x *TopicsIndex) RetainMessage(pk packets.Packet) int64 {
 	return out
 }
 
+// ExpireRetained removes the retained message at topic if it is still the one
+// the caller judged expired: same creation time and expiry. A message retained
+// again at the same topic after the caller looked is kept. It takes the same
+// lock as RetainMessage, so the check and the removal cannot interleave with a
+// new retain. It reports whether it removed the message.
+func (x *TopicsIndex) ExpireRetained(topic string, judged packets.Packet) bool {
+	x.root.Lock()
+	defer x.root.Unlock()
+	current, ok := x.Retained.Get(topic)
+	if !ok || current.Created != judged.Created || current.Expiry != judged.Expiry {
+		return false
+	}
+	x.Retained.Delete(topic)
+	x.RetainedExpiring.Delete(topic)
+	return true
+}
+
 // set creates a topic address in the index and returns the final particle.
 func (x *TopicsIndex) set(topic string, d int) *particle {
 	var key string
